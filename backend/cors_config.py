@@ -6,7 +6,7 @@ def setup_cors(app):
     """Setup CORS for the Flask application"""
     
     # Get allowed origins from environment or use default
-    origins = os.getenv('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173')
+    origins = os.getenv('CORS_ORIGINS', 'https://project-tracking-frontend-d7o8.onrender.com')
     allowed_origins = [origin.strip() for origin in origins.split(',')]
     
     # Configure CORS with proper settings

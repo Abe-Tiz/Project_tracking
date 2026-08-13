@@ -12,7 +12,7 @@ class Config:
     DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
     
     # MongoDB
-    MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
+    MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://abebetizazu157_db_user:3gEgfrPR77OKyfEo@cluster0.fipvg8q.mongodb.net/')
     MONGO_DBNAME = os.getenv('MONGO_DBNAME', 'project_tracker')
     
     # JWT

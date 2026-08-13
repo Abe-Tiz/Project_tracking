@@ -33,7 +33,7 @@ def create_app():
     os.makedirs('uploads/files', exist_ok=True)
     
     # Get allowed origins from config
-    allowed_origins = app.config.get('CORS_ORIGINS', ['http://localhost:5173', 'http://localhost:3000'])
+    allowed_origins = app.config.get('CORS_ORIGINS', ['https://project-tracking-frontend-d7o8.onrender.com'])
     
     # Initialize CORS with comprehensive configuration
     CORS(
