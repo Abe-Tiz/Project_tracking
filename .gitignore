@@ -376,7 +376,7 @@ frontend/.nyc_output/
 *.xlsx
 *.pdf
 *.csv
-*.json
+# *.json
 exported_reports/
 reports_export/
 backend/exported_reports/
