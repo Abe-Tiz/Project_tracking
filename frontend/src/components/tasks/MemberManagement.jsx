@@ -58,18 +58,13 @@ export const MemberManagement = React.memo(({
 
   // Departments
   const departments = [
-    'Engineering',
-    'Design',
-    'Product',
-    'Quality Assurance',
-    'DevOps',
-    'Business Development',
-    'Marketing',
-    'Sales',
-    'Human Resources',
-    'Finance',
-    'Operations',
-    'Research & Development'
+    'Card Channel',
+    'ACI',
+    'Fraude and Complience',
+    'DataBase ',
+    'Cloud and Core',
+    'Cyber Security',
+    'Network Administration'
   ];
 
   // Filter members based on search
@@ -319,6 +314,9 @@ export const MemberManagement = React.memo(({
     }
   };
 
+
+
+
   // Get role badge color
   const getRoleColor = (role) => {
     const colors = {
@@ -341,18 +339,13 @@ export const MemberManagement = React.memo(({
   // Get department color
   const getDepartmentColor = (department) => {
     const colors = {
-      'Engineering': 'bg-blue-50 text-blue-600',
-      'Design': 'bg-pink-50 text-pink-600',
-      'Product': 'bg-purple-50 text-purple-600',
-      'Quality Assurance': 'bg-orange-50 text-orange-600',
-      'DevOps': 'bg-red-50 text-red-600',
-      'Business Development': 'bg-emerald-50 text-emerald-600',
-      'Marketing': 'bg-rose-50 text-rose-600',
-      'Sales': 'bg-amber-50 text-amber-600',
-      'Human Resources': 'bg-indigo-50 text-indigo-600',
-      'Finance': 'bg-lime-50 text-lime-600',
-      'Operations': 'bg-cyan-50 text-cyan-600',
-      'Research & Development': 'bg-violet-50 text-violet-600'
+      'Card Channel': 'bg-blue-50 text-blue-600',
+      'ACI': 'bg-pink-50 text-pink-600',
+      'Fraude and Complience': 'bg-purple-50 text-purple-600',
+      'DataBase': 'bg-orange-50 text-orange-600',
+      'Cloud and Core': 'bg-red-50 text-red-600',
+      'Cyber Security': 'bg-emerald-50 text-emerald-600',
+      'Network Administration': 'bg-rose-50 text-rose-600',
     };
     return colors[department] || 'bg-gray-50 text-gray-600';
   };
