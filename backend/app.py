@@ -33,7 +33,10 @@ def create_app():
     os.makedirs('uploads/files', exist_ok=True)
     
     # Get allowed origins from config
-    allowed_origins = app.config.get('CORS_ORIGINS', ['https://project-tracking-frontend-d7o8.onrender.com'])
+    # allowed_origins = app.config.get('CORS_ORIGINS', ['https://project-tracking-frontend-d7o8.onrender.com'])
+    allowed_origins = app.config.get('CORS_ORIGINS', ['https://projecttrackingfrontend.netlify.app'])
+
+    
     
     # Initialize CORS with comprehensive configuration
     CORS(
