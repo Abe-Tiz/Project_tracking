@@ -350,13 +350,19 @@ class ReportController:
             logger.error(f"Error exporting report: {str(e)}", exc_info=True)
             return {'error': f'Failed to export report: {str(e)}'}, 500
 
+
+
     @staticmethod
     def _export_excel(report_data, project_name, report):
-        """Export as Excel with exactly 2 sheets: Dashboard + Tracking Sheet"""
+        """Export as Excel with 2 sheets: Dashboard + Tracking Sheet.
+        Dashboard uses live formulas that reference the Tracking Sheet,
+        so editing the tracking sheet updates the dashboard automatically.
+        """
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
             from openpyxl.chart import BarChart, PieChart, Reference
+            from openpyxl.worksheet.datavalidation import DataValidation
             from io import BytesIO
 
             logger.info(f"Generating Excel report for {project_name}")
@@ -391,6 +397,7 @@ class ReportController:
             dash = report_data.get('dashboard', {})
             kpis = dash.get('kpis', {})
             ext = dash.get('extended_kpis', {})
+            tracking = report_data.get('tracking_sheet', [])
 
             # ============================================================
             # SHEET 1: DASHBOARD
@@ -401,6 +408,14 @@ class ReportController:
             ws.column_dimensions['A'].width = 3
             for col in ['B', 'C', 'D', 'E', 'F']:
                 ws.column_dimensions[col].width = 22
+
+            # Range of tracking data used by formulas
+            # Data starts at row 6 in the Tracking Sheet, up to row 1000
+            TS = "'Tracking Sheet'"
+            STATUS_RANGE = f"{TS}!$G$6:$G$1000"
+            PRIORITY_RANGE = f"{TS}!$H$6:$H$1000"
+            DESC_RANGE = f"{TS}!$C$6:$C$1000"
+            DUE_RANGE = f"{TS}!$F$6:$F$1000"
 
             # ---- Title ----
             ws.merge_cells('B2:F2')
@@ -423,19 +438,19 @@ class ReportController:
             ws['B4'].font = muted_font
             ws['B4'].alignment = left
 
-            # ---- KPI Row (5 cols) ----
+            # ---- KPI Row (5 cols) with LIVE FORMULAS ----
             row = 6
             kpi_cols = ['Total Tasks', 'Completed', 'In Progress', 'Not Started', 'Overdue']
-            kpi_vals = [
-                kpis.get('total_tasks', 0),
-                kpis.get('completed', 0),
-                kpis.get('in_progress', 0),
-                kpis.get('not_started', 0),
-                kpis.get('overdue', 0),
+            kpi_formulas = [
+                f"=COUNTA({DESC_RANGE})",
+                f'=COUNTIF({STATUS_RANGE},"Done")',
+                f'=COUNTIF({STATUS_RANGE},"In Progress")',
+                f'=COUNTIF({STATUS_RANGE},"Not Started")',
+                f'=SUMPRODUCT(({DUE_RANGE}<>"")*({DUE_RANGE}<TODAY())*({STATUS_RANGE}<>"Done"))',
             ]
             kpi_fills = [sub_header_fill, completed_fill, in_progress_fill, todo_fill, high_fill]
 
-            for i, (label, val, fill) in enumerate(zip(kpi_cols, kpi_vals, kpi_fills)):
+            for i, (label, formula, fill) in enumerate(zip(kpi_cols, kpi_formulas, kpi_fills)):
                 col = 2 + i
                 c = ws.cell(row=row, column=col, value=label)
                 c.font = kpi_label_font
@@ -443,26 +458,35 @@ class ReportController:
                 c.alignment = center
                 c.border = border
 
-                c = ws.cell(row=row + 1, column=col, value=val)
+                c = ws.cell(row=row + 1, column=col, value=formula)
                 c.font = kpi_value_font
                 c.fill = fill
                 c.alignment = center
                 c.border = border
 
-            # ---- Progress Overview ----
+            # ---- Progress Overview with LIVE FORMULAS ----
             row = 9
             ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
             ws.cell(row=row, column=2, value='Progress Overview').font = section_font
 
             row += 1
             progress_items = [
-                ('% Complete', f"{ext.get('percent_complete', 0)}%", ext.get('progress_color', '#1B4F72')),
-                ('Progress Status', ext.get('progress_status', 'N/A'), ext.get('progress_color', '#1B4F72')),
-                ('Schedule Health', ext.get('schedule_health', 'N/A'), ext.get('schedule_color', '#1B4F72')),
-                ('Due Soon (≤7d)', ext.get('due_soon', 0), '#E65100'),
-                ('Review Pending', ext.get('review', 0), '#6A1B9A'),
+                ('% Complete',
+                 f'=IFERROR(COUNTIF({STATUS_RANGE},"Done")/COUNTA({DESC_RANGE}),0)'),
+                ('Progress Status',
+                 # Nested IF for status
+                 f'=IF(B11>=0.8,"On Track",IF(B11>=0.5,"Progressing",IF(B11>=0.2,"Behind Schedule","At Risk")))'),
+                ('Schedule Health',
+                 # Attention if any overdue, Critical if >2
+                 f'=IF(B8=0,"Healthy",IF(B8<=2,"Attention","Critical"))'),
+                ('Due Soon (≤7d)',
+                 f'=SUMPRODUCT(({DUE_RANGE}<>"")*({DUE_RANGE}>=TODAY())*({DUE_RANGE}<=TODAY()+7)*({STATUS_RANGE}<>"Done"))'),
+                ('Review Pending',
+                 f'=COUNTIF({STATUS_RANGE},"Review")'),
             ]
-            for i, (label, val, color) in enumerate(progress_items):
+            progress_colors = ['#1B4F72', '#1B4F72', '#1B4F72', '#E65100', '#6A1B9A']
+
+            for i, ((label, formula), color) in enumerate(zip(progress_items, progress_colors)):
                 col = 2 + i
                 c = ws.cell(row=row, column=col, value=label)
                 c.font = kpi_label_font
@@ -470,13 +494,16 @@ class ReportController:
                 c.alignment = center
                 c.border = border
 
-                c = ws.cell(row=row + 1, column=col, value=val)
+                c = ws.cell(row=row + 1, column=col, value=formula)
                 c.font = Font(bold=True, size=13, color=color.replace('#', ''))
                 c.fill = sub_header_fill
                 c.alignment = center
                 c.border = border
 
-            # ---- Open Tasks by Priority ----
+            # Apply percent format to % Complete cell
+            ws.cell(row=row + 1, column=2).number_format = '0.0%'
+
+            # ---- Open Tasks by Priority with LIVE FORMULAS ----
             row = 13
             ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
             ws.cell(row=row, column=2, value='Open Tasks by Priority').font = section_font
@@ -490,31 +517,33 @@ class ReportController:
                 c.border = border
 
             priority_rows = [
-                ('High', dash.get('open_tasks_by_priority', {}).get('high', 0),
-                 dash.get('total_tasks_by_priority', {}).get('high', 0), high_fill),
-                ('Medium', dash.get('open_tasks_by_priority', {}).get('medium', 0),
-                 dash.get('total_tasks_by_priority', {}).get('medium', 0), medium_fill),
-                ('Low', dash.get('open_tasks_by_priority', {}).get('low', 0),
-                 dash.get('total_tasks_by_priority', {}).get('low', 0), low_fill),
+                ('High', high_fill),
+                ('Medium', medium_fill),
+                ('Low', low_fill),
             ]
-            for i, (label, open_c, total_c, fill) in enumerate(priority_rows):
+            for i, (label, fill) in enumerate(priority_rows):
                 r = row + 1 + i
+
                 c = ws.cell(row=r, column=2, value=label)
                 c.fill = fill
                 c.alignment = center
                 c.border = border
                 c.font = Font(bold=True)
 
-                c = ws.cell(row=r, column=3, value=open_c)
+                # Open count formula
+                c = ws.cell(row=r, column=3,
+                            value=f'=SUMPRODUCT(({PRIORITY_RANGE}="{label}")*({STATUS_RANGE}<>"Done"))')
                 c.alignment = center
                 c.border = border
                 c.font = Font(bold=True)
 
-                c = ws.cell(row=r, column=4, value=total_c)
+                # Total count formula
+                c = ws.cell(row=r, column=4,
+                            value=f'=COUNTIF({PRIORITY_RANGE},"{label}")')
                 c.alignment = center
                 c.border = border
 
-            # ---- Status Breakdown ----
+            # ---- Status Breakdown with LIVE FORMULAS ----
             row = 19
             ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
             ws.cell(row=row, column=2, value='Status Breakdown').font = section_font
@@ -527,26 +556,33 @@ class ReportController:
                 c.alignment = center
                 c.border = border
 
-            status_labels = dash.get('status_breakdown', {}).get('labels', [])
-            status_values = dash.get('status_breakdown', {}).get('values', [])
-            status_fills = [completed_fill, in_progress_fill, review_fill, todo_fill]
-            total_tasks = kpis.get('total_tasks', 0) or 1
-
-            for i, (label, val) in enumerate(zip(status_labels, status_values)):
+            status_list = [
+                ('Done', completed_fill),
+                ('In Progress', in_progress_fill),
+                ('Review', review_fill),
+                ('Not Started', todo_fill),
+            ]
+            for i, (label, fill) in enumerate(status_list):
                 r = row + 1 + i
+
                 c = ws.cell(row=r, column=2, value=label)
-                c.fill = status_fills[i] if i < len(status_fills) else todo_fill
+                c.fill = fill
                 c.alignment = center
                 c.border = border
                 c.font = Font(bold=True)
 
-                c = ws.cell(row=r, column=3, value=val)
+                # Count formula
+                c = ws.cell(row=r, column=3,
+                            value=f'=COUNTIF({STATUS_RANGE},"{label}")')
                 c.alignment = center
                 c.border = border
 
-                c = ws.cell(row=r, column=4, value=f"{round(val / total_tasks * 100, 1)}%")
+                # Share formula
+                c = ws.cell(row=r, column=4,
+                            value=f'=IFERROR(C{r}/COUNTA({DESC_RANGE}),0)')
                 c.alignment = center
                 c.border = border
+                c.number_format = '0.0%'
 
             # ---- Team Workload ----
             row = 25
@@ -563,15 +599,17 @@ class ReportController:
 
             team = dash.get('team_workload', [])
             team_start_row = row + 1
-            for i, m in enumerate(team[:10]):
+            for i, m in enumerate(team[:15]):
                 r = row + 1 + i
                 vals = [m.get('name', ''), m.get('role', ''), m.get('total', 0),
-                        m.get('completed', 0), f"{m.get('completion_rate', 0)}%"]
+                        m.get('completed', 0), m.get('completion_rate', 0) / 100]
                 for j, v in enumerate(vals):
                     c = ws.cell(row=r, column=2 + j, value=v)
                     c.border = border
                     c.alignment = center if j >= 2 else left
-            team_end_row = row + len(team[:10])
+                    if j == 4:
+                        c.number_format = '0.0%'
+            team_end_row = row + len(team[:15])
 
             # ---- Upcoming Milestones ----
             milestones = dash.get('upcoming_milestones', [])
@@ -592,16 +630,13 @@ class ReportController:
                     r = row + 1 + i
                     days = ms.get('days_left', 0)
                     if days < 0:
-                        days_text = f"{abs(days)}d overdue"
                         fill = high_fill
                     elif days <= 3:
-                        days_text = f"{days}d"
                         fill = medium_fill
                     else:
-                        days_text = f"{days}d"
                         fill = low_fill
 
-                    vals = [ms.get('title', ''), ms.get('due_date', ''), days_text,
+                    vals = [ms.get('title', ''), ms.get('due_date', ''), days,
                             ms.get('status', ''), ms.get('priority', '')]
                     for j, v in enumerate(vals):
                         c = ws.cell(row=r, column=2 + j, value=v)
@@ -611,9 +646,9 @@ class ReportController:
                             c.fill = fill
                             c.font = Font(bold=True)
 
-            # ---- Charts ----
+            # ---- Charts (reference dashboard KPI cells) ----
             try:
-                # Status Donut
+                # Status Donut — references status breakdown counts
                 pie = PieChart()
                 pie.title = 'Status Distribution'
                 pie.height = 7
@@ -624,13 +659,13 @@ class ReportController:
                 pie.set_categories(labels)
                 ws.add_chart(pie, 'H6')
 
-                # Priority Bar
+                # Priority Bar — references priority totals
                 bar = BarChart()
                 bar.type = 'col'
                 bar.title = 'Tasks by Priority'
                 bar.height = 7
                 bar.width = 12
-                data = Reference(ws, min_col=3, min_row=14, max_row=17)
+                data = Reference(ws, min_col=4, min_row=14, max_row=17)
                 cats = Reference(ws, min_col=2, min_row=15, max_row=17)
                 bar.add_data(data, titles_from_data=True)
                 bar.set_categories(cats)
@@ -668,19 +703,35 @@ class ReportController:
                 c.alignment = center
                 c.border = border
 
-            tracking = report_data.get('tracking_sheet', [])
-            row = 6
+            data_row_start = 6
+            row = data_row_start
             for item in tracking:
+                # No.
                 ws2.cell(row=row, column=1, value=item.get('no', '')).border = border
-                ws2.cell(row=row, column=2, value=item.get('requesting_team', '')).border = border
-                ws2.cell(row=row, column=3, value=item.get('task_description', '')).border = border
-                ws2.cell(row=row, column=4, value=item.get('assigned_to', '')).border = border
-                ws2.cell(row=row, column=5, value=item.get('start_date', '')).border = border
-                ws2.cell(row=row, column=6, value=item.get('end_date', '')).border = border
+                ws2.cell(row=row, column=1).alignment = center
 
+                # Requesting Team
+                ws2.cell(row=row, column=2, value=item.get('requesting_team', '')).border = border
+
+                # Description
+                ws2.cell(row=row, column=3, value=item.get('task_description', '')).border = border
+
+                # Assigned To
+                ws2.cell(row=row, column=4, value=item.get('assigned_to', '')).border = border
+
+                # Start Date
+                ws2.cell(row=row, column=5, value=item.get('start_date', '')).border = border
+                ws2.cell(row=row, column=5).alignment = center
+
+                # End Date
+                ws2.cell(row=row, column=6, value=item.get('end_date', '')).border = border
+                ws2.cell(row=row, column=6).alignment = center
+
+                # Status (color-coded)
                 status = item.get('current_status', 'Not Started')
                 sc = ws2.cell(row=row, column=7, value=status)
                 sc.border = border
+                sc.alignment = center
                 if status == 'Done':
                     sc.font = Font(color=C.COLOR_SUCCESS, bold=True)
                     sc.fill = completed_fill
@@ -693,38 +744,114 @@ class ReportController:
                 else:
                     sc.fill = todo_fill
 
-                ws2.cell(row=row, column=8, value=item.get('priority', 'Medium')).border = border
-
-                pc = ws2.cell(row=row, column=9, value=item.get('percent_complete', 0))
-                pc.number_format = '0%'
+                # Priority (color-coded)
+                priority = item.get('priority', 'Medium')
+                pc = ws2.cell(row=row, column=8, value=priority)
                 pc.border = border
+                pc.alignment = center
+                if priority == 'High':
+                    pc.fill = high_fill
+                    pc.font = Font(bold=True, color=C.COLOR_DANGER)
+                elif priority == 'Medium':
+                    pc.fill = medium_fill
+                    pc.font = Font(bold=True, color=C.COLOR_WARNING)
+                elif priority == 'Low':
+                    pc.fill = low_fill
+                    pc.font = Font(bold=True, color=C.COLOR_SUCCESS)
 
+                # % Complete — LIVE FORMULA that reflects status
+                pct_cell = ws2.cell(
+                    row=row, column=9,
+                    value=f'=IF(G{row}="Done",1,IF(G{row}="Review",0.75,IF(G{row}="In Progress",0.5,0)))'
+                )
+                pct_cell.number_format = '0%'
+                pct_cell.border = border
+                pct_cell.alignment = center
+
+                # Remarks
                 ws2.cell(row=row, column=10, value=item.get('remarks_notes', '')).border = border
 
-                for col in range(1, 11):
-                    cc = ws2.cell(row=row, column=col)
-                    if col in (1, 5, 6, 8, 9):
-                        cc.alignment = center
-                    else:
-                        cc.alignment = left
+                for col in (2, 3, 4, 10):
+                    ws2.cell(row=row, column=col).alignment = left
+
                 ws2.row_dimensions[row].height = 28
                 row += 1
 
-            # Auto-number formula for empty rows (template behavior)
-            for er in range(row, row + 20):
+            # Fill empty rows with formulas (template behavior) so user can add new tasks
+            # and dashboard will pick them up automatically
+            empty_rows = 50
+            for er in range(row, row + empty_rows):
+                # Auto-increment No.
                 ws2.cell(row=er, column=1,
-                         value=f'=IF(C{er}="","",MAX($A$5:A{er-1})+1)')
+                         value=f'=IF(C{er}="","",MAX($A${data_row_start}:A{er-1})+1)')
+                ws2.cell(row=er, column=1).border = border
+                ws2.cell(row=er, column=1).alignment = center
+
+                # % Complete formula for empty rows
+                pct_cell = ws2.cell(
+                    row=er, column=9,
+                    value=f'=IF(G{er}="Done",1,IF(G{er}="Review",0.75,IF(G{er}="In Progress",0.5,0)))'
+                )
+                pct_cell.number_format = '0%'
+                pct_cell.border = border
+                pct_cell.alignment = center
+
+                # Borders on all 10 cols
+                for col in range(1, 11):
+                    cell = ws2.cell(row=er, column=col)
+                    cell.border = border
+
+            # ---- Data Validations for Tracking Sheet ----
+            # Status dropdown (Col G)
+            status_dv = DataValidation(
+                type="list",
+                formula1='"Done,In Progress,Review,Not Started"',
+                allow_blank=True,
+                showDropDown=False,
+            )
+            status_dv.error = "Please pick a valid status"
+            status_dv.errorTitle = "Invalid Status"
+            status_dv.prompt = "Choose status"
+            status_dv.promptTitle = "Status"
+            ws2.add_data_validation(status_dv)
+            status_dv.add(f"G{data_row_start}:G{row + empty_rows}")
+
+            # Priority dropdown (Col H)
+            priority_dv = DataValidation(
+                type="list",
+                formula1='"High,Medium,Low"',
+                allow_blank=True,
+                showDropDown=False,
+            )
+            priority_dv.error = "Please pick a valid priority"
+            priority_dv.errorTitle = "Invalid Priority"
+            priority_dv.prompt = "Choose priority"
+            priority_dv.promptTitle = "Priority"
+            ws2.add_data_validation(priority_dv)
+            priority_dv.add(f"H{data_row_start}:H{row + empty_rows}")
+
+            # Freeze header row
+            ws2.freeze_panes = 'A6'
+            ws.freeze_panes = 'A6'
+
+            # Auto-filter on Tracking Sheet header
+            ws2.auto_filter.ref = f"A5:J{row + empty_rows}"
 
             # ---- Save ----
             output = BytesIO()
             wb.save(output)
             output.seek(0)
 
-            logger.info(f"Excel report generated for {project_name}")
+            logger.info(f"Excel report generated for {project_name} "
+                        f"({len(tracking)} tracking rows)")
 
             response = make_response(output.getvalue())
-            response.headers['Content-Disposition'] = f'attachment; filename={project_name}_report.xlsx'
-            response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            response.headers['Content-Disposition'] = (
+                f'attachment; filename={project_name}_report.xlsx'
+            )
+            response.headers['Content-Type'] = (
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
             response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
@@ -736,6 +863,395 @@ class ReportController:
         except Exception as e:
             logger.error(f"Error exporting Excel: {str(e)}", exc_info=True)
             return {'error': f'Failed to export Excel: {str(e)}'}, 500
+
+
+
+    # @staticmethod
+    # def _export_excel(report_data, project_name, report):
+    #     """Export as Excel with exactly 2 sheets: Dashboard + Tracking Sheet"""
+    #     try:
+    #         import openpyxl
+    #         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    #         from openpyxl.chart import BarChart, PieChart, Reference
+    #         from io import BytesIO
+
+    #         logger.info(f"Generating Excel report for {project_name}")
+
+    #         wb = openpyxl.Workbook()
+    #         C = ReportController
+
+    #         # ---------- Shared styles ----------
+    #         title_font = Font(bold=True, size=16, color=C.COLOR_NAVY)
+    #         section_font = Font(bold=True, size=12, color=C.COLOR_NAVY)
+    #         header_font = Font(bold=True, size=11, color=C.COLOR_WHITE)
+    #         kpi_value_font = Font(bold=True, size=18, color=C.COLOR_NAVY)
+    #         kpi_label_font = Font(bold=True, size=10, color=C.COLOR_WHITE)
+    #         muted_font = Font(size=10, color=C.COLOR_MUTED)
+
+    #         header_fill = PatternFill('solid', fgColor=C.COLOR_NAVY)
+    #         sub_header_fill = PatternFill('solid', fgColor=C.COLOR_LIGHT_BLUE)
+    #         completed_fill = PatternFill('solid', fgColor=C.COLOR_COMPLETED)
+    #         in_progress_fill = PatternFill('solid', fgColor=C.COLOR_IN_PROGRESS)
+    #         review_fill = PatternFill('solid', fgColor=C.COLOR_REVIEW)
+    #         todo_fill = PatternFill('solid', fgColor=C.COLOR_TODO)
+    #         high_fill = PatternFill('solid', fgColor=C.COLOR_HIGH)
+    #         medium_fill = PatternFill('solid', fgColor=C.COLOR_MEDIUM)
+    #         low_fill = PatternFill('solid', fgColor=C.COLOR_LOW)
+
+    #         thin = Side(style='thin', color=C.COLOR_BORDER)
+    #         border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    #         center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    #         left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+    #         header = report_data.get('header', {})
+    #         dash = report_data.get('dashboard', {})
+    #         kpis = dash.get('kpis', {})
+    #         ext = dash.get('extended_kpis', {})
+
+    #         # ============================================================
+    #         # SHEET 1: DASHBOARD
+    #         # ============================================================
+    #         ws = wb.active
+    #         ws.title = 'Dashboard'
+
+    #         ws.column_dimensions['A'].width = 3
+    #         for col in ['B', 'C', 'D', 'E', 'F']:
+    #             ws.column_dimensions[col].width = 22
+
+    #         # ---- Title ----
+    #         ws.merge_cells('B2:F2')
+    #         ws['B2'] = header.get('report_title', f'{project_name} — Progress Dashboard')
+    #         ws['B2'].font = title_font
+    #         ws['B2'].alignment = left
+
+    #         ws.merge_cells('B3:F3')
+    #         ws['B3'] = f"Last updated: {header.get('last_updated', '')}    |    Source: Tracking Sheet tab"
+    #         ws['B3'].font = muted_font
+    #         ws['B3'].alignment = left
+
+    #         ws.merge_cells('B4:F4')
+    #         ws['B4'] = (
+    #             f"Owner: {header.get('owner', 'N/A')}    |    "
+    #             f"Status: {header.get('project_status', 'Active')}    |    "
+    #             f"Priority: {header.get('project_priority', 'Medium')}    |    "
+    #             f"Company: {header.get('company', 'N/A')}"
+    #         )
+    #         ws['B4'].font = muted_font
+    #         ws['B4'].alignment = left
+
+    #         # ---- KPI Row (5 cols) ----
+    #         row = 6
+    #         kpi_cols = ['Total Tasks', 'Completed', 'In Progress', 'Not Started', 'Overdue']
+    #         kpi_vals = [
+    #             kpis.get('total_tasks', 0),
+    #             kpis.get('completed', 0),
+    #             kpis.get('in_progress', 0),
+    #             kpis.get('not_started', 0),
+    #             kpis.get('overdue', 0),
+    #         ]
+    #         kpi_fills = [sub_header_fill, completed_fill, in_progress_fill, todo_fill, high_fill]
+
+    #         for i, (label, val, fill) in enumerate(zip(kpi_cols, kpi_vals, kpi_fills)):
+    #             col = 2 + i
+    #             c = ws.cell(row=row, column=col, value=label)
+    #             c.font = kpi_label_font
+    #             c.fill = header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #             c = ws.cell(row=row + 1, column=col, value=val)
+    #             c.font = kpi_value_font
+    #             c.fill = fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #         # ---- Progress Overview ----
+    #         row = 9
+    #         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+    #         ws.cell(row=row, column=2, value='Progress Overview').font = section_font
+
+    #         row += 1
+    #         progress_items = [
+    #             ('% Complete', f"{ext.get('percent_complete', 0)}%", ext.get('progress_color', '#1B4F72')),
+    #             ('Progress Status', ext.get('progress_status', 'N/A'), ext.get('progress_color', '#1B4F72')),
+    #             ('Schedule Health', ext.get('schedule_health', 'N/A'), ext.get('schedule_color', '#1B4F72')),
+    #             ('Due Soon (≤7d)', ext.get('due_soon', 0), '#E65100'),
+    #             ('Review Pending', ext.get('review', 0), '#6A1B9A'),
+    #         ]
+    #         for i, (label, val, color) in enumerate(progress_items):
+    #             col = 2 + i
+    #             c = ws.cell(row=row, column=col, value=label)
+    #             c.font = kpi_label_font
+    #             c.fill = header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #             c = ws.cell(row=row + 1, column=col, value=val)
+    #             c.font = Font(bold=True, size=13, color=color.replace('#', ''))
+    #             c.fill = sub_header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #         # ---- Open Tasks by Priority ----
+    #         row = 13
+    #         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+    #         ws.cell(row=row, column=2, value='Open Tasks by Priority').font = section_font
+
+    #         row += 1
+    #         for i, h in enumerate(['Priority', 'Open Count', 'Total Count']):
+    #             c = ws.cell(row=row, column=2 + i, value=h)
+    #             c.font = header_font
+    #             c.fill = header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #         priority_rows = [
+    #             ('High', dash.get('open_tasks_by_priority', {}).get('high', 0),
+    #              dash.get('total_tasks_by_priority', {}).get('high', 0), high_fill),
+    #             ('Medium', dash.get('open_tasks_by_priority', {}).get('medium', 0),
+    #              dash.get('total_tasks_by_priority', {}).get('medium', 0), medium_fill),
+    #             ('Low', dash.get('open_tasks_by_priority', {}).get('low', 0),
+    #              dash.get('total_tasks_by_priority', {}).get('low', 0), low_fill),
+    #         ]
+    #         for i, (label, open_c, total_c, fill) in enumerate(priority_rows):
+    #             r = row + 1 + i
+    #             c = ws.cell(row=r, column=2, value=label)
+    #             c.fill = fill
+    #             c.alignment = center
+    #             c.border = border
+    #             c.font = Font(bold=True)
+
+    #             c = ws.cell(row=r, column=3, value=open_c)
+    #             c.alignment = center
+    #             c.border = border
+    #             c.font = Font(bold=True)
+
+    #             c = ws.cell(row=r, column=4, value=total_c)
+    #             c.alignment = center
+    #             c.border = border
+
+    #         # ---- Status Breakdown ----
+    #         row = 19
+    #         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5)
+    #         ws.cell(row=row, column=2, value='Status Breakdown').font = section_font
+
+    #         row += 1
+    #         for i, h in enumerate(['Status', 'Count', 'Share']):
+    #             c = ws.cell(row=row, column=2 + i, value=h)
+    #             c.font = header_font
+    #             c.fill = header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #         status_labels = dash.get('status_breakdown', {}).get('labels', [])
+    #         status_values = dash.get('status_breakdown', {}).get('values', [])
+    #         status_fills = [completed_fill, in_progress_fill, review_fill, todo_fill]
+    #         total_tasks = kpis.get('total_tasks', 0) or 1
+
+    #         for i, (label, val) in enumerate(zip(status_labels, status_values)):
+    #             r = row + 1 + i
+    #             c = ws.cell(row=r, column=2, value=label)
+    #             c.fill = status_fills[i] if i < len(status_fills) else todo_fill
+    #             c.alignment = center
+    #             c.border = border
+    #             c.font = Font(bold=True)
+
+    #             c = ws.cell(row=r, column=3, value=val)
+    #             c.alignment = center
+    #             c.border = border
+
+    #             c = ws.cell(row=r, column=4, value=f"{round(val / total_tasks * 100, 1)}%")
+    #             c.alignment = center
+    #             c.border = border
+
+    #         # ---- Team Workload ----
+    #         row = 25
+    #         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+    #         ws.cell(row=row, column=2, value='Team Workload').font = section_font
+
+    #         row += 1
+    #         for i, h in enumerate(['Name', 'Role', 'Total', 'Completed', 'Rate']):
+    #             c = ws.cell(row=row, column=2 + i, value=h)
+    #             c.font = header_font
+    #             c.fill = header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #         team = dash.get('team_workload', [])
+    #         team_start_row = row + 1
+    #         for i, m in enumerate(team[:10]):
+    #             r = row + 1 + i
+    #             vals = [m.get('name', ''), m.get('role', ''), m.get('total', 0),
+    #                     m.get('completed', 0), f"{m.get('completion_rate', 0)}%"]
+    #             for j, v in enumerate(vals):
+    #                 c = ws.cell(row=r, column=2 + j, value=v)
+    #                 c.border = border
+    #                 c.alignment = center if j >= 2 else left
+    #         team_end_row = row + len(team[:10])
+
+    #         # ---- Upcoming Milestones ----
+    #         milestones = dash.get('upcoming_milestones', [])
+    #         if milestones:
+    #             row = team_end_row + 3
+    #             ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+    #             ws.cell(row=row, column=2, value='Upcoming Milestones').font = section_font
+
+    #             row += 1
+    #             for i, h in enumerate(['Task', 'Due Date', 'Days Left', 'Status', 'Priority']):
+    #                 c = ws.cell(row=row, column=2 + i, value=h)
+    #                 c.font = header_font
+    #                 c.fill = header_fill
+    #                 c.alignment = center
+    #                 c.border = border
+
+    #             for i, ms in enumerate(milestones):
+    #                 r = row + 1 + i
+    #                 days = ms.get('days_left', 0)
+    #                 if days < 0:
+    #                     days_text = f"{abs(days)}d overdue"
+    #                     fill = high_fill
+    #                 elif days <= 3:
+    #                     days_text = f"{days}d"
+    #                     fill = medium_fill
+    #                 else:
+    #                     days_text = f"{days}d"
+    #                     fill = low_fill
+
+    #                 vals = [ms.get('title', ''), ms.get('due_date', ''), days_text,
+    #                         ms.get('status', ''), ms.get('priority', '')]
+    #                 for j, v in enumerate(vals):
+    #                     c = ws.cell(row=r, column=2 + j, value=v)
+    #                     c.border = border
+    #                     c.alignment = center if j >= 1 else left
+    #                     if j == 2:
+    #                         c.fill = fill
+    #                         c.font = Font(bold=True)
+
+    #         # ---- Charts ----
+    #         try:
+    #             # Status Donut
+    #             pie = PieChart()
+    #             pie.title = 'Status Distribution'
+    #             pie.height = 7
+    #             pie.width = 12
+    #             labels = Reference(ws, min_col=2, min_row=20, max_row=23)
+    #             data = Reference(ws, min_col=3, min_row=20, max_row=23)
+    #             pie.add_data(data, titles_from_data=False)
+    #             pie.set_categories(labels)
+    #             ws.add_chart(pie, 'H6')
+
+    #             # Priority Bar
+    #             bar = BarChart()
+    #             bar.type = 'col'
+    #             bar.title = 'Tasks by Priority'
+    #             bar.height = 7
+    #             bar.width = 12
+    #             data = Reference(ws, min_col=3, min_row=14, max_row=17)
+    #             cats = Reference(ws, min_col=2, min_row=15, max_row=17)
+    #             bar.add_data(data, titles_from_data=True)
+    #             bar.set_categories(cats)
+    #             ws.add_chart(bar, 'H20')
+    #         except Exception as chart_err:
+    #             logger.warning(f"Chart generation skipped: {chart_err}")
+
+    #         # ============================================================
+    #         # SHEET 2: TRACKING SHEET
+    #         # ============================================================
+    #         ws2 = wb.create_sheet('Tracking Sheet')
+
+    #         widths = {'A': 5, 'B': 22, 'C': 50, 'D': 20, 'E': 18,
+    #                   'F': 18, 'G': 16, 'H': 10, 'I': 12, 'J': 45}
+    #         for col, w in widths.items():
+    #             ws2.column_dimensions[col].width = w
+
+    #         ws2.merge_cells('A1:J1')
+    #         ws2['A1'] = f'{project_name} — Tracking Sheet'
+    #         ws2['A1'].font = Font(bold=True, size=18, color=C.COLOR_NAVY)
+    #         ws2['A1'].alignment = center
+
+    #         ws2.merge_cells('A2:J2')
+    #         ws2['A2'] = f"Generated: {header.get('generated_at', datetime.utcnow().isoformat())}"
+    #         ws2['A2'].font = muted_font
+    #         ws2['A2'].alignment = center
+
+    #         headers = ['No.', 'Requesting Team', 'Task / Request Description', 'Assigned To',
+    #                    'Start Date', 'End Date', 'Current Status', 'Priority',
+    #                    '% Complete', 'Remarks / Notes']
+    #         for i, h in enumerate(headers, 1):
+    #             c = ws2.cell(row=5, column=i, value=h)
+    #             c.font = header_font
+    #             c.fill = header_fill
+    #             c.alignment = center
+    #             c.border = border
+
+    #         tracking = report_data.get('tracking_sheet', [])
+    #         row = 6
+    #         for item in tracking:
+    #             ws2.cell(row=row, column=1, value=item.get('no', '')).border = border
+    #             ws2.cell(row=row, column=2, value=item.get('requesting_team', '')).border = border
+    #             ws2.cell(row=row, column=3, value=item.get('task_description', '')).border = border
+    #             ws2.cell(row=row, column=4, value=item.get('assigned_to', '')).border = border
+    #             ws2.cell(row=row, column=5, value=item.get('start_date', '')).border = border
+    #             ws2.cell(row=row, column=6, value=item.get('end_date', '')).border = border
+
+    #             status = item.get('current_status', 'Not Started')
+    #             sc = ws2.cell(row=row, column=7, value=status)
+    #             sc.border = border
+    #             if status == 'Done':
+    #                 sc.font = Font(color=C.COLOR_SUCCESS, bold=True)
+    #                 sc.fill = completed_fill
+    #             elif status == 'In Progress':
+    #                 sc.font = Font(color=C.COLOR_WARNING, bold=True)
+    #                 sc.fill = in_progress_fill
+    #             elif status == 'Review':
+    #                 sc.font = Font(color='6A1B9A', bold=True)
+    #                 sc.fill = review_fill
+    #             else:
+    #                 sc.fill = todo_fill
+
+    #             ws2.cell(row=row, column=8, value=item.get('priority', 'Medium')).border = border
+
+    #             pc = ws2.cell(row=row, column=9, value=item.get('percent_complete', 0))
+    #             pc.number_format = '0%'
+    #             pc.border = border
+
+    #             ws2.cell(row=row, column=10, value=item.get('remarks_notes', '')).border = border
+
+    #             for col in range(1, 11):
+    #                 cc = ws2.cell(row=row, column=col)
+    #                 if col in (1, 5, 6, 8, 9):
+    #                     cc.alignment = center
+    #                 else:
+    #                     cc.alignment = left
+    #             ws2.row_dimensions[row].height = 28
+    #             row += 1
+
+    #         # Auto-number formula for empty rows (template behavior)
+    #         for er in range(row, row + 20):
+    #             ws2.cell(row=er, column=1,
+    #                      value=f'=IF(C{er}="","",MAX($A$5:A{er-1})+1)')
+
+    #         # ---- Save ----
+    #         output = BytesIO()
+    #         wb.save(output)
+    #         output.seek(0)
+
+    #         logger.info(f"Excel report generated for {project_name}")
+
+    #         response = make_response(output.getvalue())
+    #         response.headers['Content-Disposition'] = f'attachment; filename={project_name}_report.xlsx'
+    #         response.headers['Content-Type'] = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    #         response.headers['Access-Control-Allow-Origin'] = '*'
+    #         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    #         response.headers['Access-Control-Expose-Headers'] = 'Content-Disposition'
+    #         return response
+
+    #     except ImportError as e:
+    #         logger.error(f"openpyxl not installed: {str(e)}")
+    #         return {'error': 'openpyxl is required for Excel export'}, 500
+    #     except Exception as e:
+    #         logger.error(f"Error exporting Excel: {str(e)}", exc_info=True)
+    #         return {'error': f'Failed to export Excel: {str(e)}'}, 500
 
     # ================================================================
     # CRUD
