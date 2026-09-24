@@ -156,7 +156,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
             ))}
           </nav>
 
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mt-6 mb-3">Support</p>
+          {/* <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mt-6 mb-3">Support</p>
           <nav className="space-y-1">
             <Link
               to="/dashboard/help"
@@ -165,7 +165,7 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
               <FiHelpCircle className="mr-3 h-5 w-5" />
               Help & Support
             </Link>
-          </nav>
+          </nav> */}
         </div>
 
         {/* Logout Section */}
