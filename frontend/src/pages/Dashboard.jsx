@@ -48,10 +48,10 @@ const Sidebar = ({ isOpen, setIsOpen }) => {
   const menuItems = [
     { icon: FiHome, label: 'Dashboard', path: '/dashboard' },
     { icon: FiGrid, label: 'Projects', path: '/dashboard/projects' },
-    { icon: FiCheckSquare, label: 'Tasks', path: '/dashboard/tasks' },
-    { icon: FiUsers, label: 'Team', path: '/dashboard/users' },
-    { icon: FiBarChart2, label: 'Analytics', path: '/dashboard/analytics' },
-    { icon: FiCalendar, label: 'Calendar', path: '/dashboard/calendar' },
+    // { icon: FiCheckSquare, label: 'Tasks', path: '/dashboard/tasks' },
+    // { icon: FiUsers, label: 'Team', path: '/dashboard/users' },
+    // { icon: FiBarChart2, label: 'Analytics', path: '/dashboard/analytics' },
+    // { icon: FiCalendar, label: 'Calendar', path: '/dashboard/calendar' },
     { icon: FiSettings, label: 'Settings', path: '/dashboard/settings' },
   ];
 
